@@ -1,0 +1,698 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+'%!in%' <<-  Negate('%in%')
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+```
+# Set environment 
+
+```{r}
+## Starting 
+
+# Clean environment
+rm(list=ls())
+gc()
+# Disable scientific notation
+options(scipen=999)
+# Change prompt
+options(prompt="NPB_V0.3> ", continue=" ") 
+
+# Load utilities functions (change wd, auxiliary scripts...)
+source("Scripts/utiles.R")
+set_environment()
+library(Matrix)
+library(rsample)
+library(dplyr)
+library(h2o)
+library(DALEX)
+library(Matrix)
+library(factorMerger)
+library(breakDown)
+library(cowplot)
+library(scales)
+library(ggcorrplot)
+h2o.no_progress()
+h2o.init()
+```
+
+# model parameters 
+```{r}
+data_tesis_path <- os.path.join(data_path, "Temporary")
+
+products <<- c("tcredito", "crediservice", "ahorros", "cdt", "vehiculo", 
+               "libranza", "libredestino", "nomina", "vivienda")
+
+train_months <<- c(get_month(22), get_month(5))
+dev_month <<- get_month(4)
+test_month <<- get_month(3)
+model_alias_modeling_vector <- c()
+
+# converting cutting months
+train_cut_max <- max(train_months)
+train_cut_max <-
+  as.Date(paste0(as.character(train_cut_max), '01'), format = '%Y%m%d')
+train_cut_min <- min(train_months)
+train_cut_min <-
+  as.Date(paste0(as.character(train_cut_min), '01'), format = '%Y%m%d')
+dev_cut <-
+  as.Date(paste0(as.character(dev_month), '01'), format = '%Y%m%d')
+test_cut <-
+  as.Date(paste0(as.character(test_month), '01'), format = '%Y%m%d')
+
+
+# # set random seed for reproducibility
+set.seed(5)
+
+cores <- detectCores() - 1
+
+
+i = 1
+load(file ="Models/temporary_models/models_comparison.RData")
+```
+
+
+```{r}
+model_alias_modeling <<-
+  paste0("tesis", today() %>% format(., "%Y%m%d"), "_", products[i])
+model_alias_modeling_vector[i] <-
+  paste0("tesis", today() %>% format(., "%Y%m%d"), "_", products[i])
+model_type_modeling <<- products[i]
+
+dt_product_path <- os.path.join(data_tesis_path, products[i]) 
+
+# load data
+print(paste("Loading data for", products[i]))
+data <- get.path(dt_product_path, products[i]) %>% readRDS()
+data[, aa_estrato := paste0("estr_", aa_estrato)]
+data[, aa_estrato := factor(aa_estrato, levels = paste0("estr_", 0:6))]
+data[, target := factor(target)]
+# divinding master table
+test <- data[periodo == test_cut]
+dev <- data[periodo == dev_cut]
+master <- data[periodo >= train_cut_min &
+                 periodo <= train_cut_max]
+```
+
+
+```{r}
+str(master)
+```
+
+```{r}
+sapply(master, function(x)sum(is.na(x)))
+```
+
+```{r}
+theme1 <- theme_bw()+
+  theme(axis.text.x = element_text(angle = 0, hjust = 1, vjust = 0.5),legend.position="none")
+theme2 <- theme_bw()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),legend.position="none")
+```
+
+## Exploracion de datos
+
+```{r}
+master %>% 
+  group_by(target) %>% 
+  summarise(Count = n())%>% 
+  mutate(percent = prop.table(Count)*100)%>%
+  ggplot(aes(reorder(target, -percent), percent), fill = target)+
+  geom_col(fill = c("#FC4E07", "#E7B800"))+
+  geom_text(aes(label = sprintf("%.2f%%", percent)), hjust = 0.01,vjust = -0.5, size =3)+ 
+  theme_bw()+  
+  xlab("Compradores de tarjeta") + 
+  ylab("Porcentaje")+
+  ggtitle("Porcentaje agregado de compradores de tarjeta de crédito")
+```
+
+```{r}
+plot_base <- data %>% 
+  group_by(periodo, target) %>% 
+  summarise(Count = n())%>% 
+  mutate(percent = prop.table(Count)*100) %>% data.table
+
+
+ggplot(plot_base[target == 1],aes(periodo, percent), fill = periodo) +
+  geom_col(fill = "#FC4E07") +
+  geom_text(
+  aes(label = sprintf("%.2f%%", percent)),
+  hjust = 0.5,
+  vjust = 1,
+  size = 3,
+  angle = -45
+  ) +
+  
+  theme_bw() +
+  xlab("Meses") +
+  ylab("Porcentaje") +
+  ggtitle("Porcentaje de clientes compradores de tarjeta de crédito")
+  
+```
+### Variables categóricas
+```{r}
+categorical_cols <- names(data)[sapply(master, is.factor)]
+categorical_cols
+```
+```{r}
+x_lab <- "Nivel educativo"
+data %>%
+  group_by(nivel_educativo, target) %>%
+  summarise(Count = n()) %>%
+  mutate(percent = prop.table(Count) * 100) %>% data.table %>%
+  ggplot(aes(x = nivel_educativo, y = percent, fill = target)) +
+  geom_bar(stat = "identity") + geom_text(aes(
+  x = nivel_educativo,
+  y = percent,
+  label = paste0(round(percent, 2), "%")
+  ), size = 4) + theme_bw() +
+  xlab(x_lab) +
+  ylab("Porcentaje") +
+  ggtitle(paste("Porcentaje de clientes compradores por", tolower(x_lab)))
+
+```
+
+```{r}
+x_lab <- "Ocupacion"
+data %>%
+  group_by(aa_cod_ocupacion, target) %>%
+  summarise(Count = n()) %>%
+  mutate(percent = prop.table(Count) * 100) %>% data.table %>%
+  ggplot(aes(x = aa_cod_ocupacion, y = percent, fill = target)) +
+  geom_bar(stat = "identity") + geom_text(aes(
+  x = aa_cod_ocupacion,
+  y = percent,
+  label = paste0(round(percent, 2), "%")
+  ), size = 4) + theme_bw() +
+  xlab(x_lab) +
+  ylab("Porcentaje") +
+  ggtitle(paste("Porcentaje de clientes compradores por", tolower(x_lab)))
+
+```
+```{r}
+t <-data %>%
+  group_by(aa_cod_ocupacion, target) %>%
+  summarise(Count = n()) %>%
+  mutate(percent = prop.table(Count) * 100) %>% data.table
+t[target == 1][order(-percent)]
+```
+
+```{r}
+x_lab <- "Codigo ciiu"
+data %>%
+  group_by(aa_cod_ciiu, target) %>%
+  summarise(Count = n()) %>%
+  mutate(percent = prop.table(Count) * 100) %>% data.table %>%
+  ggplot(aes(x = aa_cod_ciiu, y = percent, fill = target)) +
+  geom_bar(stat = "identity") + geom_text(aes(
+  x = aa_cod_ciiu,
+  y = percent,
+  label = paste0(round(percent, 2), "%")
+  ), size = 4) + theme_bw() +
+  xlab(x_lab) +
+  ylab("Porcentaje") +
+  ggtitle(paste("Porcentaje de clientes compradores por", tolower(x_lab)))
+
+```
+```{r}
+t <- data %>%
+  group_by(aa_cod_ciiu, target) %>%
+  summarise(Count = n()) %>%
+  mutate(percent = prop.table(Count) * 100) %>% data.table
+t[target == 1][order(-percent)]
+```
+
+```{r}
+x_lab <- "Departamento"
+data %>%
+  group_by(departamento, target) %>%
+  summarise(Count = n()) %>%
+  mutate(percent = prop.table(Count) * 100) %>% data.table %>%
+  ggplot(aes(x = departamento, y = percent, fill = target)) +
+  geom_bar(stat = "identity") + geom_text(aes(
+  x = departamento,
+  y = percent,
+  label = paste0(round(percent, 2), "%")
+  ), size = 4) + theme_bw() +
+  xlab(x_lab) +
+  ylab("Porcentaje") +
+  ggtitle(paste("Porcentaje de clientes compradores por", tolower(x_lab)))
+  
+```
+```{r}
+t <- data %>%
+  group_by(departamento, target) %>%
+  summarise(Count = n()) %>%
+  mutate(percent = prop.table(Count) * 100) %>% data.table
+t[target == 1][order(-percent)]
+```
+
+```{r}
+x_lab <- "Declara renta"
+data %>%
+  group_by(aa_declara_renta, target) %>%
+  summarise(Count = n()) %>%
+  mutate(percent = prop.table(Count) * 100) %>% data.table %>%
+  ggplot(aes(x = aa_declara_renta, y = percent, fill = target)) +
+  geom_bar(stat = "identity") + geom_text(aes(
+  x = aa_declara_renta,
+  y = percent,
+  label = paste0(round(percent, 2), "%")
+  ), size = 4) + theme_bw() +
+  xlab(x_lab) +
+  ylab("Porcentaje") +
+  ggtitle(paste("Porcentaje de clientes compradores por", tolower(x_lab)))
+  
+```
+
+```{r}
+x_lab <- "Estrato socio económico"
+data %>%
+  group_by(aa_estrato, target) %>%
+  summarise(Count = n()) %>%
+  mutate(percent = prop.table(Count) * 100) %>% data.table %>%
+  ggplot(aes(x = aa_estrato, y = percent, fill = target)) +
+  geom_bar(stat = "identity") + geom_text(aes(
+  x = aa_estrato,
+  y = percent,
+  label = paste0(round(percent, 2), "%")
+  ), size = 4) + theme_bw() +
+  xlab(x_lab) +
+  ylab("Porcentaje") +
+  ggtitle(paste("Porcentaje de clientes compradores por", tolower(x_lab)))
+  
+```
+
+```{r}
+x_lab <- "Tipo vivienda"
+data %>%
+  group_by(aa_tipo_vivienda, target) %>%
+  summarise(Count = n()) %>%
+  mutate(percent = prop.table(Count) * 100) %>% data.table %>%
+  ggplot(aes(x = aa_tipo_vivienda, y = percent, fill = target)) +
+  geom_bar(stat = "identity") + geom_text(aes(
+  x = aa_tipo_vivienda,
+  y = percent,
+  label = paste0(round(percent, 2), "%")
+  ), size = 4) + theme_bw() +
+  xlab(x_lab) +
+  ylab("Porcentaje") +
+  ggtitle(paste("Porcentaje de clientes compradores por", tolower(x_lab)))
+  
+```
+
+```{r}
+x_lab <- "Estado civil"
+data %>%
+  group_by(mar_status, target) %>%
+  summarise(Count = n()) %>%
+  mutate(percent = prop.table(Count) * 100) %>% data.table %>%
+  ggplot(aes(x = mar_status, y = percent, fill = target)) +
+  geom_bar(stat = "identity") + geom_text(aes(
+  x = mar_status,
+  y = percent,
+  label = paste0(round(percent, 2), "%")
+  ), size = 4) + theme_bw() +
+  xlab(x_lab) +
+  ylab("Porcentaje") +
+  ggtitle(paste("Porcentaje de clientes compradores por", tolower(x_lab)))
+  
+```
+
+```{r}
+x_lab <- "Sexo"
+data %>%
+  group_by(sex, target) %>%
+  summarise(Count = n()) %>%
+  mutate(percent = prop.table(Count) * 100) %>% data.table %>%
+  ggplot(aes(x = sex, y = percent, fill = target)) +
+  geom_bar(stat = "identity") + geom_text(aes(
+  x = sex,
+  y = percent,
+  label = paste0(round(percent, 2), "%")
+  ), size = 4) + theme_bw() +
+  xlab(x_lab) +
+  ylab("Porcentaje") +
+  ggtitle(paste("Porcentaje de clientes compradores por", tolower(x_lab)))
+
+```
+
+```{r}
+x_lab <- "Segmento comercial"
+data %>%
+  group_by(bb_seg_comercial, target) %>%
+  summarise(Count = n()) %>%
+  mutate(percent = prop.table(Count) * 100) %>% data.table %>%
+  ggplot(aes(x = bb_seg_comercial, y = percent, fill = target)) +
+  geom_bar(stat = "identity") + geom_text(aes(
+  x = bb_seg_comercial,
+  y = percent,
+  label = paste0(round(percent, 2), "%")
+  ), size = 4) + theme_bw() +
+  xlab(x_lab) +
+  ylab("Porcentaje") +
+  ggtitle(paste("Porcentaje de clientes compradores por", tolower(x_lab)))
+  
+```
+
+
+
+### numercial variables
+
+
+```{r}
+numeric_cols <- names(data)[sapply(master, is.numeric)]
+numeric_cols
+```
+```{r}
+data.frame(estadistico = rep(names(summary(data$total_products)), 2), data[, .(valor = summary(total_products)), by = target])
+```
+```{r}
+data.frame(estadistico = rep(names(summary(data$total_products)), 2), data[, .(valor = summary(pr_tcredito.last.owned)), by = target])
+```
+```{r}
+data.frame(estadistico = rep(names(summary(data$total_products)), 2), data[, .(valor = summary(pr_tcredito_purchase.count)), by = target])
+```
+```{r}
+data.frame(estadistico = rep(names(summary(data$total_products)), 2), data[, .(valor = summary(num.transactions)), by = target])
+```
+
+```{r}
+y_lab <- "Antigüedad"
+
+ggplot(data, aes(y = antiguedad, x = "", fill = target)) + 
+  geom_boxplot()+ 
+  theme_bw()+
+  xlab(" ")+
+  ylab(y_lab) +
+  scale_y_continuous(labels = comma, limits = quantile(data[, get("antiguedad")], c(0.1, 0.9))) +
+  ggtitle(paste("Porcentaje de clientes compradores por", tolower(y_lab)))
+```
+
+```{r}
+y_lab <- "Edad"
+
+ggplot(data, aes(y = age, x = "", fill = target)) + 
+  geom_boxplot()+ 
+  theme_bw()+
+  xlab(" ")+
+  ylab(y_lab) +
+  scale_y_continuous(labels = comma, limits = quantile(data[, get("age")], c(0.1, 0.9))) +
+  ggtitle(paste("Porcentaje de clientes compradores por", tolower(y_lab)))
+```
+
+```{r}
+y_lab <- "Valor de pasivos"
+
+ggplot(data, aes(y = aa_vlr_pasivos, x = "", fill = target)) + 
+  geom_boxplot()+ 
+  theme_bw()+
+  xlab(" ")+
+  ylab(y_lab) +
+  scale_y_continuous(labels = comma, limits = quantile(data[, get("aa_vlr_pasivos")], c(0.1, 0.9))) +
+  ggtitle(paste("Porcentaje de clientes compradores por", tolower(y_lab)))
+```
+
+```{r}
+y_lab <- "Valor de egresos mensuales"
+
+ggplot(data, aes(y = aa_vlr_egreso_mes, x = "", fill = target)) + 
+  geom_boxplot()+ 
+  theme_bw()+
+  xlab(" ")+
+  ylab(y_lab) +
+  scale_y_continuous(labels = comma, limits = quantile(data[, get("aa_vlr_egreso_mes")], c(0.1, 0.9))) +
+  ggtitle(paste("Porcentaje de clientes compradores por", tolower(y_lab)))
+```
+
+
+```{r}
+# options(repr.plot.width =6, repr.plot.height = 2)
+y_lab <- "Valor de ingresos mensuales"
+
+ggplot(data, aes(y = aa_vlr_ing_bru_mes, x = "", fill = target)) + 
+  geom_boxplot()+ 
+  theme_bw()+
+  xlab(" ")+
+  ylab(y_lab) +
+  scale_y_continuous(labels = comma, limits = quantile(data[, get("aa_vlr_ing_bru_mes")], c(0.1, 0.9))) +
+  ggtitle(paste("Porcentaje de clientes compradores por", tolower(y_lab)))
+```
+
+
+```{r}
+# options(repr.plot.width =6, repr.plot.height = 2)
+y_lab <- "Valor de activos"
+
+ggplot(data, aes(y = aa_vlr_activos, x = "", fill = target)) + 
+  geom_boxplot()+ 
+  theme_bw()+
+  xlab(" ")+
+  ylab(y_lab) +
+  scale_y_continuous(labels = comma, limits = quantile(data[, get("aa_vlr_activos")], c(0.1, 0.9))) +
+  ggtitle(paste("Porcentaje de clientes compradores por", tolower(y_lab)))
+```
+### corelaciones 
+```{r}
+data[, target_num := as.numeric(target)]
+data[, .N, by = target]
+fin_vars <- grep("vlr", names(data), value = T)
+fin_cor <- round(cor(data[,mget(c(fin_vars, "target_num"))] ), 1)
+ggcorrplot(fin_cor,  title = "Correlation")+theme(plot.title = element_text(hjust = 0.5))
+```
+```{r}
+numeric_cols <- names(data)[sapply(master, is.numeric)]
+numeric_cols
+```
+```{r}
+pr_vars <- grep("pr", names(data), value = T)
+pr_cor <- round(cor(data[,mget(c(pr_vars, "target_num"))]), 1)
+ggcorrplot(pr_cor,  title = "Correlation")+theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+## Xgboost models
+```{r}
+# create model 
+# Classifing variables into categories
+# there's a bunch of features related to the products, and thus they have similar
+# names. Separate them out to keep things straight
+
+id_variables <-
+  c("llave", "periodo", "month.id", "month", "year", "target")
+products_variables <- names(master)[grepl("pr_", names(master))]
+products_variables <-
+  c(products_variables, "total_products", "num.transactions")
+crm_vars <-
+  names(master)[names(master) %!in% c(id_variables, products_variables)]
+
+categorical_cols <-
+  c(crm_vars[sapply(master[, mget(crm_vars)], is.factor)],
+    "month", "year")
+
+numeric_cols <-
+  c(crm_vars[!(sapply(master[, mget(crm_vars)], is.factor))],
+    products_variables)
+
+print("One hot encoding")
+# one-hot encode the categorical features
+final_cols <- c("target",categorical_cols, numeric_cols)
+
+master_dmatrix <-
+  sparse.model.matrix(target ~ . - 1, data = master[, mget(final_cols)])
+
+dev_dmatrix <-
+  sparse.model.matrix(target ~ . - 1, data = dev[, mget(final_cols)])
+test_dmatrix <-
+  sparse.model.matrix(target ~ . - 1, data = test[, mget(final_cols)])
+
+model_cols <- test_dmatrix@Dimnames[[2]]
+
+# separate target
+target_train_dmatrix <-
+  as(data.matrix(master$target), 'dgCMatrix')
+target_dev_dmatrix <-
+  as(data.matrix(dev$target), 'dgCMatrix')
+target_test_dmatrix <-
+  as(data.matrix(test$target), 'dgCMatrix')
+
+dtrain <-
+  xgb.DMatrix(data = master_dmatrix, label = target_train_dmatrix)
+ddev <- xgb.DMatrix(data = dev_dmatrix, label = target_dev_dmatrix)
+dtest <- xgb.DMatrix(data = test_dmatrix, label = target_test_dmatrix)
+
+gc()
+
+```
+
+```{r}
+watchlist <- list(train = dtrain, test = ddev)
+# # set random seed for reproducibility
+set.seed(1104)
+
+cores <- detectCores() - 2
+# training model
+# there are two ways of trainging xgboost models for a binary clasification problems: using AUC of precision-recall curve or AUC of ROC. The firsth is more usefull for unbalance classes as getting a financial product. 
+
+
+print("Training xgboost model using precision-recall curve")
+xgb.parameters <- list(booster = "gbtree",
+                       objective = "binary:logistic",
+                       eval_metric = "aucpr",
+                       early_stoping_round = 30,
+                       nrounds = 500)
+
+model_xgb_pr <- xgb.train(
+  data = dtrain,
+  nround = xgb.parameters$nrounds,
+  params = xgb.parameters,
+  early_stopping_rounds = xgb.parameters$early_stoping_round,
+  verbose = 1 ,
+  nthread = cores, 
+  watchlist = watchlist
+  
+)
+
+print("Training xgboost model using ROC curve")
+
+xgb.parameters <- list(booster = "gbtree",
+                       objective = "binary:logistic",
+                       eval_metric = "auc",
+                       early_stoping_round = 30,
+                       nrounds = 500)
+
+model_xgb_auc <- xgb.train(
+  data = dtrain,
+  nround = xgb.parameters$nrounds,
+  params = xgb.parameters,
+  early_stopping_rounds = xgb.parameters$early_stoping_round,
+  verbose = 1 ,
+  nthread = cores, 
+  watchlist = watchlist
+  
+)
+
+
+
+```
+
+```{r}
+# convert to h2o object
+class(master$target)
+master_h2o <- as.h2o(master[, mget(final_cols)])
+dev_h2o <- as.h2o(dev[, mget(final_cols)])
+test_h20 <- as.h2o(test[, mget(final_cols)])
+
+names(master_h2o)
+# variable names for resonse & features
+y <- "target"
+x <- setdiff(names(master_h2o), y) 
+```
+
+```{r}
+# elastic net model 
+glm <- h2o.glm(
+  x = x, 
+  y = y, 
+  training_frame = master_h2o,
+  validation_frame = dev_h2o,
+  family = "binomial",
+  seed = 123
+  )
+
+# random forest model
+rf <- h2o.randomForest(
+  x = x, 
+  y = y,
+  training_frame = master_h2o,
+  validation_frame = dev_h2o,
+  ntrees = 1000,
+  stopping_metric = "AUC",    
+  stopping_rounds = 10,         
+  stopping_tolerance = 0.005,
+  seed = 123
+  )
+
+# gradient boosting machine model
+gbm <-  h2o.gbm(
+  x = x, 
+  y = y,
+  training_frame = master_h2o,
+  validation_frame = dev_h2o,
+  ntrees = 1000,
+  stopping_metric = "AUC",    
+  stopping_rounds = 10,         
+  stopping_tolerance = 0.005,
+  seed = 123
+  )
+
+# model performance
+h2o.auc(glm, valid = TRUE)
+## [1] 0.7870935
+h2o.auc(rf, valid = TRUE)
+## [1] 0.7681021
+h2o.auc(gbm, valid = TRUE)
+## [1] 0.7468242
+```
+
+# prediction 
+```{r}
+xgb_auc_preds_master <-  predict(model_xgb_auc, master_dmatrix)
+xgb_auc_preds_dev <-  predict(model_xgb_auc, dev_dmatrix)
+xgb_auc_preds_test <-  predict(model_xgb_auc, test_dmatrix)
+
+xgb_pr_preds_master <-  predict(model_xgb_pr, master_dmatrix)
+xgb_pr_preds_dev <-  predict(model_xgb_pr, dev_dmatrix)
+xgb_pr_preds_test <-  predict(model_xgb_pr, test_dmatrix)
+
+glm_preds <- predict(glm, master_h2o)
+```
+
+```{r}
+xgb_auc_roc_obj_master <- roc(master$target, xgb_auc_preds_master)
+xgb_auc_roc_obj_dev <- roc(dev$target, xgb_auc_preds_dev)
+xgb_auc_roc_obj_test <- roc(test$target, xgb_auc_preds_test)
+
+paste("xgb_auc ROC AUC train", pROC::auc(xgb_auc_roc_obj_master))
+paste("xgb_auc ROC AUC develop", pROC::auc(xgb_auc_roc_obj_dev))
+paste("xgb_auc ROC AUC test", pROC::auc(xgb_auc_roc_obj_test))
+
+```
+
+
+```{r}
+xgb_pr_roc_obj_master <- roc(master$target, xgb_pr_preds_master)
+xgb_pr_roc_obj_dev <- roc(dev$target, xgb_pr_preds_dev)
+xgb_pr_roc_obj_test <- roc(test$target, xgb_pr_preds_test)
+
+paste("xgb_pr ROC AUC train", pROC::auc(xgb_pr_roc_obj_master))
+paste("xgb_pr ROC AUC develop", pROC::auc(xgb_pr_roc_obj_dev))
+paste("xgb_pr_auc ROC AUC test", pROC::auc(xgb_pr_roc_obj_test))
+```
+
+## other models 
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+

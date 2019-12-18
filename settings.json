@@ -1,0 +1,44 @@
+{
+  "paths": {
+    "scripts_path": "Scripts",
+    "results_path": "Results",
+    "data_path": "Data",
+    "log_path": "Logs",
+    "models_path" : "Models",
+    "data_cat": ["Dictionary", "Original", "Staging", "Meta", "Master"],
+    "comment": ["tcredito", "crediservice", "ahorros", "cdt", "vehiculo", 
+                "libranza", "libredestino", "nomina", "vivienda"]
+  },
+ 
+ "modeling":{
+    "train_months": ["201709","201806"],
+    "dev_month" : ["201807"],
+    "test_month": ["201808"],
+    "model_alias": "20181128_tcredito",
+    "model_type" : "tcredito"
+  },
+  "scoring":{
+    "model_alias": "20181128_cdt",
+    "date_to_score":["201808"],
+    "model_type_score":"cdt",
+    "performance_calculation": "TRUE"
+  },
+  "month_process":{
+    "month_to_create": ["201903"]
+  },
+  "next_product_to_buy":{
+    "models":["tesis_20190122_tcredito",
+          "tesis_20190123_ahorros",
+          "tesis_20190123_cdt",
+          "tesis_20190123_crediservice",
+          "tesis_20190123_libranza",
+          "tesis_20190123_libredestino",
+          "tesis_20190123_nomina",
+          "tesis_20190123_vehiculo",
+          "tesis_20190123_vivienda"],
+    "model_alias_npb": "tesis_20190125_npb",
+    "date_to_predict" : ["201808"],
+    "performance" : "TRUE"
+  },
+  "job":"Creation"
+}

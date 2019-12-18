@@ -1,0 +1,351 @@
+---
+title: "dalex_package"
+author: "Daniel Zapata"
+date: "15 de abril de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+'%!in%' <<-  Negate('%in%')
+```
+
+# Model Interpretability with DALEX
+
+
+As advanced machine learning algorithms are gaining acceptance across many organizations and domains, machine learning interpretability is growing in importance to help extract insight and clarity regarding how these algorithms are performing and why one prediction is made over another. There are many methodologies to interpret machine learning results (i.e. variable importance via permutation, partial dependence plots, local interpretable model-agnostic explanations), and many machine learning R packages implement their own versions of one or more methodologies. However, some recent R packages that focus purely on ML interpretability agnostic to any specific ML algorithm are gaining popularity. One such package is DALEX and this post covers what this package does (and does not do) so that you can determine if it should become part of your preferred machine learning toolbox.
+
+tl;dr
+Advantages & disadvantages: a quick breakdown of what DALEX does and does not do.
+Replication requirements: what you’ll need to reproduce the analysis.
+DALEX procedures: necessary functions for downstream explainers.
+Residual diagnostics: understanding and comparing errors.
+Variable importance: permutation based importance score.
+Predictor-response relationship: PDP and ALE plots.
+Local interpretation: explanations for a single prediction.
+Advantages & disadvantages
+DALEX is an R package with a set of tools that help to provide Descriptive mAchine Learning EXplanations ranging from global to local interpretability methods. In particular, it makes comparing performance across multiple models convenient. However, as is, there are some problems with this package scaling to wider data sets commonly used by organizations. The following provides a quick list of its pros and cons:
+
+Advantages
+
+ML model and package agnostic: can be used for any supervised regression and binary classification ML model where you can customize the format of the predicted output.
+Provides convenient approaches to compare results across multiple models.
+Residual diagnostics: allows you to compare residual distributions.
+Variable importance: uses a permutation-based approach for variable importance, which is model agnostic, and accepts any loss function to assess importance.
+Partial dependence plots: leverages the pdp package.
+Provides an alternative to PDPs for categorical predictor variables (merging path plots).
+Includes a unique and intuitive approach for local intepretation.
+Disadvantages
+
+Some functions do not scale well to wide data (may predictor variables)
+Currently only supports regression and binary classification problems (i.e. no multinomial support).
+Only provides permutation-based variable importance scores (which become slow as number of features increase).
+PDP plots can only be performed one variable at a time (options for two-way interaction PDP plots).
+Does not provide ICE curves.
+Does not provide alternative local interpretation algorithms (i.e. LIME, SHAP values).
+Replication requirements
+I leverage the following packages:
+
+```{r}
+library(rsample)
+library(dplyr)
+library(h2o)
+library(DALEX)
+library(data.table)
+library(Matrix)
+library(xgboost)
+library(factorMerger)
+library(breakDown)
+h2o.no_progress()
+h2o.init()
+```
+
+To demonstrate model visualization techniques we’ll use the employee attrition data that has been included in the rsample package. This demonstrates a binary classification problem (“Yes” vs. “No”) but the same process that you’ll observe can be used for a regression problem.
+
+To demonstrate DALEX’s capabilities we’ll use the employee attrition data that has been included in the rsample package. This demonstrates a binary classification problem (“Yes” vs. “No”) but the same process that you’ll observe can be used for a regression problem. I perform a few house cleaning tasks on the data prior to converting to an h2o object and splitting.
+
+NOTE: To use some of DALEX’s functions, categorical predictor variables need to be converted to factors. Also, I force ordered factors to be unordered as h2o does not support ordered categorical variables.
+
+```{r}
+# classification data
+df <- rsample::attrition %>% 
+  mutate_if(is.ordered, factor, ordered = FALSE) %>%
+  mutate(Attrition = recode(Attrition, "Yes" = "1", "No" = "0") %>% factor(levels = c("1", "0")))
+
+# convert to h2o object
+df.h2o <- as.h2o(df)
+
+# create train, validation, and test splits
+set.seed(123)
+splits <- h2o.splitFrame(df.h2o, ratios = c(.7, .15), destination_frames = c("train","valid","test"))
+names(splits) <- c("train","valid","test")
+
+# variable names for resonse & features
+y <- "Attrition"
+x <- setdiff(names(df), y) 
+```
+
+We will explore how to visualize a few of the more common machine learning algorithms implemented with h2o. For brevity I train default models and do not emphasize hyperparameter tuning. The following produces a regularized logistic regression, random forest, and gradient boosting machine models; all of which provide AUCs ranging between .75-.79. Although these models have distinct AUC scores, our objective is to understand how these models come to this conclusion in similar or different ways based on underlying logic and data structure.
+
+```{r}
+# elastic net model 
+glm <- h2o.glm(
+  x = x, 
+  y = y, 
+  training_frame = splits$train,
+  validation_frame = splits$valid,
+  family = "binomial",
+  seed = 123
+  )
+
+# random forest model
+rf <- h2o.randomForest(
+  x = x, 
+  y = y,
+  training_frame = splits$train,
+  validation_frame = splits$valid,
+  ntrees = 1000,
+  stopping_metric = "AUC",    
+  stopping_rounds = 10,         
+  stopping_tolerance = 0.005,
+  seed = 123
+  )
+
+# gradient boosting machine model
+gbm <-  h2o.gbm(
+  x = x, 
+  y = y,
+  training_frame = splits$train,
+  validation_frame = splits$valid,
+  ntrees = 1000,
+  stopping_metric = "AUC",    
+  stopping_rounds = 10,         
+  stopping_tolerance = 0.005,
+  seed = 123
+  )
+
+# model performance
+h2o.auc(glm, valid = TRUE)
+## [1] 0.7870935
+h2o.auc(rf, valid = TRUE)
+## [1] 0.7681021
+h2o.auc(gbm, valid = TRUE)
+## [1] 0.7468242
+```
+
+
+
+## DALEX procedures
+The DALEX architecture can be split into three primary operations:
+
+Any supervised regression or binary classification model with defined input (X) and output (Y) where the output can be customized to a defined format can be used.
+The machine learning model is converted to an “explainer” object via DALEX::explain(), which is just a list that contains the training data and meta data on the machine learning model.
+The explainer object can be passed onto multiple functions that explain different components of the given model.
+
+Although DALEX does have native support for some ML model objects (i.e. lm, randomForest), it does not have native many of the preferred ML packages produced more recently (i.e. h2o, xgboost, ranger). To make DALEX compatible with these objects, we need three things:
+
+x_valid: Our feature set needs to be in its original form not as an h2o object.
+y_valid: Our response variable needs to be a numeric vector. For regression problems this is simple, as it will already be in this format. For binary classification this requires you to convert the responses to 0/1.
+pred: a custom predict function that returns a vector of numeric values. For binary classification problems, this means extracting the probability of the response.
+```{r}
+# convert feature data to non-h2o objects
+x_valid <- as.data.frame(splits$valid)[, x]
+# make response variable numeric binary vector
+y_valid <- as.vector(as.numeric(as.character(splits$valid$Attrition)))
+head(y_valid)
+## [1] 0 0 0 0 0 0
+
+# create custom predict function
+pred <- function(model, newdata)  {
+  results <- as.data.frame(h2o.predict(model, as.h2o(newdata)))
+  return(results[[3L]])
+  }
+
+pred(rf, x_valid) %>% head()
+## [1] 0.18181818 0.27272727 0.06060606 0.54545455 0.03030303 0.42424242
+```
+Once you have these three components, you can now create your explainer objects for each ML model. Considering I used a validation set to compute the AUC, we want to use that same validation set for ML interpretability.
+```{r}
+# elastic net explainer
+explainer_glm <- explain(
+  model = glm,
+  data = x_valid,
+  y = y_valid,
+  predict_function = pred,
+  label = "h2o glm"
+  )
+
+# random forest explainer
+explainer_rf <- explain(
+  model = rf,
+  data = x_valid,
+  y = y_valid,
+  predict_function = pred,
+  label = "h2o rf"
+  )
+
+# GBM explainer
+explainer_gbm <- explain(
+  model = gbm,
+  data = x_valid,
+  y = y_valid,
+  predict_function = pred,
+  label = "h2o gbm"
+  )
+
+# example of explainer object
+class(explainer_glm)
+## [1] "explainer"
+summary(explainer_glm)
+```
+
+```{r}
+train_rest <- sample.int( nrow(df), nrow(df)*0.7, replace = F)
+rest <- (1:nrow(df))[1:nrow(df) %!in% train_rest]
+dev <- sample(rest, length(rest)*0.5, replace = F)
+test <-  rest[rest %!in% dev]
+train_obs <- data.table(df[train_rest,])
+train_obs_dmatrix <- sparse.model.matrix(Attrition ~ . -1, data = train_obs)
+dev_obs <- data.table(df[dev,])
+dev_obs_dmatrix <- sparse.model.matrix(Attrition ~ . -1, data = dev_obs)
+test_obs <- data.table(df[test,])
+test_obs_dmatrix <- sparse.model.matrix(Attrition ~ . -1, data = test_obs)
+
+
+model_cols <- train_obs_dmatrix@Dimnames[[2]]
+  
+# separate target
+target_train_dmatrix <-
+  as(data.matrix(train_obs$Attrition), 'dgCMatrix')
+target_dev_dmatrix <-
+  as(data.matrix(dev_obs$Attrition), 'dgCMatrix')
+
+dtrain <-
+  xgb.DMatrix(data = train_obs_dmatrix, label = target_train_dmatrix)
+ddev <-
+  xgb.DMatrix(data = dev_obs_dmatrix, label = target_dev_dmatrix)
+
+watchlist <- list(train = dtrain, test = ddev)
+xgb.parameters <- list(booster = "gbtree",
+                         objective = "binary:logistic",
+                         eval_metric = "auc",
+                         early_stoping_round = 30,
+                         nrounds = 500)
+model_xgb <- xgb.train(
+    data = dtrain,
+    nround = xgb.parameters$nrounds,
+    params = xgb.parameters,
+    early_stopping_rounds = xgb.parameters$early_stoping_round,
+    verbose = 1 ,
+    watchlist = watchlist
+    
+  )
+```
+
+```{r}
+explainer_xgb <- explain(model_xgb, data = dev_obs_dmatrix, 
+                         y = dev_obs$Attrition == "Yes", label = "xgboost")
+class(explainer_xgb)
+summary(explainer_xgb)
+```
+
+## Residual diagnostics
+As we saw earlier, the GLM model had the highest AUC followed by the random forest model then GBM. However, a single accuracy metric can be a poor indicator of performance. Assessing residuals of predicted versus actuals can allow you to identify where models deviate in their predictive accuracy. We can use DALEX::model_performance to compute the predictions and residuals. Printing the output returns residual quantiles and plotting the output allows for easy comparison of absolute residual values across models.
+
+In this example, the residuals are comparing the probability of attrition to the binary attrition value (1-yes, 0-no). Looking at the quantiles you can see that the median residuals are lowest for the GBM model. And looking at the boxplots you can see that the GBM model also had the lowest median absolute residual value. Thus, although the GBM model had the lowest AUC score, it actually performs best when considering the median absoluate residuals. However, you can also see a higher number of residuals in the tail of the GBM residual distribution (left plot) suggesting that there may be a higher number of large residuals compared to the GLM model. This helps to illustrate how your residuals behave similarly and differently across models.
+```{r}
+# compute predictions & residuals
+resids_glm <- model_performance(explainer_glm)
+resids_rf  <- model_performance(explainer_rf)
+resids_gbm <- model_performance(explainer_gbm)
+resids_xgb <- model_performance(explainer_xgb)
+
+```
+
+```{r}
+resids_glm
+resids_rf
+resids_gbm
+resids_xgb
+```
+
+```{r}
+# create comparison plot of residuals for each model
+p1 <- plot(resids_glm, resids_rf, resids_gbm, resids_xgb)
+p2 <- plot(resids_glm, resids_rf, resids_gbm, resids_xgb, geom = "boxplot")
+gridExtra::grid.arrange(p1, p2, nrow = 1)
+```
+```{r}
+# compute permutation-based variable importance
+vip_glm <- variable_importance(explainer_glm, n_sample = -1, loss_function = loss_root_mean_square) 
+vip_rf  <- variable_importance(explainer_rf, n_sample = -1, loss_function = loss_root_mean_square)
+vip_gbm <- variable_importance(explainer_gbm, n_sample = -1, loss_function = loss_root_mean_square)
+vip_xgb <- variable_importance(explainer_xgb, n_sample = -1, loss_function = loss_root_mean_square)
+
+```
+
+```{r}
+plot(vip_glm,max_vars = 10, show_baseline = T)
+```
+
+```{r}
+plot(vip_rf,max_vars = 10, show_baseline = T)
+```
+
+```{r}
+plot(vip_gbm, max_vars = 10, show_baseline = T)
+```
+
+
+
+```{r}
+plot(vip_xgb, max_vars = 10, show_baseline = T)
+```
+```{r}
+# compute PDP for a given variable --> uses the pdp package
+pdp_glm  <- variable_response(explainer_glm, variable =  "Age", type = "pdp")
+pdp_rf   <- variable_response(explainer_rf,  variable =  "Age", type = "pdp")
+pdp_gbm  <- variable_response(explainer_gbm, variable =  "Age", type = "pdp")
+pdp_xgb  <- variable_response(explainer_xgb, variable =  "Age", type = "pdp")
+
+plot(pdp_glm, pdp_rf, pdp_gbm, pdp_xgb)
+```
+```{r}
+summary(predict(model_xgb,dev_obs_dmatrix))
+```
+```{r}
+summary(dev_obs$Age)
+```
+
+```{r}
+cat_glm  <- variable_response(explainer_glm, variable = "EnvironmentSatisfaction", type = "factor")
+cat_rf  <- variable_response(explainer_rf, variable = "EnvironmentSatisfaction", type = "factor")
+cat_gbm  <- variable_response(explainer_gbm, variable = "EnvironmentSatisfaction", type = "factor")
+cat_xgb  <- variable_response(explainer_xgb, variable = "EnvironmentSatisfaction", type = "factor")
+plot(cat_glm, cat_rf, cat_gbm)
+```
+
+## Local interpretation
+```{r}
+# create a single observation
+new_cust <- test_obs[1, ] %>% as.data.frame()
+new_cust_xgb <- dev_obs_dmatrix[1, ] %>% as.data.frame()
+
+# compute breakdown distances
+new_cust_glm <- prediction_breakdown(explainer_glm, observation = new_cust)
+new_cust_rf  <- prediction_breakdown(explainer_rf, observation = new_cust)
+new_cust_gbm <- prediction_breakdown(explainer_gbm, observation = new_cust)
+new_cust_xgb <- prediction_breakdown(explainer_xgb, observation = new_cust_xgb)
+
+# class of prediction_breakdown output
+class(new_cust_gbm)
+## [1] "prediction_breakdown_explainer" "data.frame"
+
+# check out the top 10 influential variables for this observation
+new_cust_gbm[1:10, 1:5]
+```
+
+```{r}
+plot(new_cust_xgb)
+```
+

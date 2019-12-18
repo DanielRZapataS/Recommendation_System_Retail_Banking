@@ -1,0 +1,323 @@
+---
+title: 'Seminaio de Analitica: interpretación del PAPI'
+author: "Daniel Zapata"
+date: "10 de abril de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+```
+
+```{r include=FALSE}
+## Starting 
+
+# Clean environment
+rm(list=ls())
+gc()
+# Disable scientific notation
+options(scipen=999)
+# Change prompt
+options(prompt="NPB_V0.3> ", continue=" ") 
+
+# Load utilities functions (change wd, auxiliary scripts...)
+source("Scripts/utiles.R")
+# Set up paths
+
+# install.packages("devtools") 
+# library(devtools) 
+# install_github("AppliedDataSciencePartners/xgboostExplainer")
+
+set_environment()
+
+library(Ckmeans.1d.dp)
+library(xgboostExplainer)
+library(rsvg)
+library(DiagrammeR)
+library(pROC)
+library(caret)
+library(iml)
+library(pdp)
+
+
+
+```
+
+```{r include=FALSE}
+# import data 
+master <-  readRDS(file = "Data/Temporary/master_exercise.rds")
+dev <- readRDS(file = "Data/Temporary/dev_exercise.rds")
+test <- readRDS(file = "Data/Temporary/test_exercise.rds")
+```
+
+```{r echo=FALSE}
+master
+names(master)
+```
+```{r include=FALSE}
+# create model 
+# Classifing variables into categories
+# there's a bunch of features related to the products, and thus they have similar
+# names. Separate them out to keep things straight
+
+id_variables <-
+  c("llave", "periodo", "month.id", "month", "year", "target")
+products_variables <- names(master)[grepl("pr_", names(master))]
+products_variables <-
+  c(products_variables, "total_products", "num.transactions")
+crm_vars <-
+  names(master)[names(master) %!in% c(id_variables, products_variables)]
+
+categorical_cols <-
+  c(crm_vars[sapply(master[, mget(crm_vars)], is.factor)],
+    "month", "year")
+categorical_cols <-
+  categorical_cols[categorical_cols %!in% c("bb_seg_comercial", "aa_cod_ocupacion")]
+
+numeric_cols <-
+  c(crm_vars[!(sapply(master[, mget(crm_vars)], is.factor))],
+    products_variables,
+    c("bb_seg_comercial", "aa_cod_ocupacion"))
+
+print("One hot encoding")
+# one-hot encode the categorical features
+ohe <- dummyVars( ~ ., data = master[, mget(categorical_cols)])
+ohe <-
+  as(data.matrix(predict(ohe, master[, mget(categorical_cols)])), "dgCMatrix")
+
+ohe_dev <- dummyVars( ~ ., data = dev[, mget(categorical_cols)])
+ohe_dev <- predict(ohe_dev, dev[, mget(categorical_cols)])
+ohe_dev <- as(data.matrix(ohe_dev), "dgCMatrix")
+
+ohe_test <- dummyVars( ~ ., data = test[, mget(categorical_cols)])
+ohe_test <- predict(ohe_test, test[, mget(categorical_cols)])
+ohe_cols <- colnames(ohe_test)
+ohe_test <- as(data.matrix(ohe_test), "dgCMatrix")
+
+print("Creating dgc matrixs")
+gc()
+# separate target
+target_train_dmatrix <-
+  as(data.matrix(master$target), 'dgCMatrix')
+target_dev_dmatrix <-
+  as(data.matrix(dev$target), 'dgCMatrix')
+target_test_dmatrix <-
+  as(data.matrix(test$target), 'dgCMatrix')
+
+# data to train and predict
+master_dmatrix         <-
+  cbind(ohe, data.matrix(master[, mget(numeric_cols)]))
+rm(ohe)
+gc()
+dev_dmatrix         <-
+  cbind(ohe_dev, data.matrix(dev[, mget(numeric_cols)]))
+rm(ohe_dev)
+gc()
+test_dmatrix       <-
+  cbind(ohe_test, data.matrix(test[, mget(numeric_cols)]))
+rm(ohe_test)
+gc()
+
+dtrain <-
+  xgb.DMatrix(data = master_dmatrix, label = target_train_dmatrix)
+ddev <- xgb.DMatrix(data = dev_dmatrix, label = target_dev_dmatrix)
+dtest <- xgb.DMatrix(data = test_dmatrix, label = target_test_dmatrix)
+# rm(master_dmatrix, target_train_dmatrix, dev_dmatrix, target_dev_dmatrix)
+gc()
+
+```
+
+```{r echo=FALSE}
+
+watchlist <- list(train = dtrain, test = ddev)
+# # set random seed for reproducibility
+set.seed(1104)
+
+cores <- detectCores() - 2
+# training model
+print("Training xgboost model")
+xgb.parameters <- list(booster = "gbtree",
+                       objective = "binary:logistic",
+                       max.depth = 6,
+                       eta = 0.8,
+                       eval_metric = "auc",
+                       alpha = 1,
+                       early_stoping_round = 30,
+                       nrounds = 500)
+
+model_xgb <- xgb.train(
+  data = dtrain,
+  nround = xgb.parameters$nrounds,
+  params = xgb.parameters,
+  early_stopping_rounds = xgb.parameters$early_stoping_round,
+  verbose = 1 ,
+  nthread = cores, 
+  watchlist = watchlist
+  
+)
+
+```
+```{r include=FALSE}
+xgb.save(model_xgb, "Data/Temporary/xgb_model.model")
+model_xgb <- xgb.load("Data/Temporary/xgb_model.model")
+```
+
+
+# Understanding your xgboost model 
+
+## AUC
+```{r echo=FALSE}
+xgb_preds_master = predict(model_xgb, master_dmatrix)
+xgb_roc_obj_master <- roc(master$target, xgb_preds_master)
+
+xgb_preds_dev = predict(model_xgb, dev_dmatrix)
+xgb_roc_obj_dev <- roc(dev$target, xgb_preds_dev)
+
+xgb_preds_test = predict(model_xgb, test_dmatrix)
+xgb_roc_obj_test <- roc(test$target, xgb_preds_test)
+
+paste("XGB AUC train", pROC::auc(xgb_roc_obj_master))
+paste("XGB AUC develop", pROC::auc(xgb_roc_obj_dev))
+paste("XGB AUC test", pROC::auc(xgb_roc_obj_test))
+```
+
+## Plot some trees
+```{r include=FALSE}
+xgb.plot.tree(model = model_xgb,  trees = 1, show_node_id = TRUE)
+```
+
+## Feature importance 
+
+ • Features names of the features used in the model; -->
+
+• Gain represents fractional contribution of each feature to the model based on the total gain of this feature’s splits. Higher percentage means a more important predictive feature.
+
+• Gain. The average training loss reduction gained when using a feature for splitting.
+
+
+• Cover metric of the number of observation related to this feature;
+Cover. The number of times a feature is used to split the data across all trees weighted by the number of training data points that go through those splits.
+
+• Frequency percentage representing the relative number of times a feature have been used in trees.
+
+```{r echo=FALSE}
+cols <- c(ohe_cols, numeric_cols)
+importance_matrix <-
+  xgb.importance(feature_names = cols, model = model_xgb)
+
+(gg <- xgb.ggplot.importance(importance_matrix, measure = "Gain", rel_to_first = FALSE, top_n = 20))
+gg + ggplot2::ylab("Gain")
+
+(gg <- xgb.ggplot.importance(importance_matrix, measure = "Cover", rel_to_first = FALSE, top_n = 20))
+gg + ggplot2::ylab("Cover")
+
+(gg <- xgb.ggplot.importance(importance_matrix, measure = "Frequency", rel_to_first = FALSE, top_n = 20))
+gg + ggplot2::ylab("Frequency")
+
+```
+
+## SHAP values 
+```{r echo=FALSE}
+contr <- predict(model_xgb, dev_dmatrix, predcontrib = TRUE)
+xgb.plot.shap(dev_dmatrix,
+              contr,
+              model = model_xgb,
+              top = 12,
+              n_col = 3)
+
+```
+```{r}
+contr <- predict(model_xgb, test_dmatrix, predcontrib = TRUE)
+xgb.plot.shap(test_dmatrix,
+              contr,
+              model = model_xgb,
+              top = 12,
+              n_col = 3)
+
+```
+
+## Get trees 
+```{r echo=FALSE}
+model_tre_xgb <- xgb.model.dt.tree(feature_names = cols, model = model_xgb)
+model_tre_xgb
+```
+
+## Xgboost explainer 
+```{r include=FALSE}
+explainer <-
+  buildExplainer(
+    model_xgb,
+    dtrain,
+    type = "binary",
+    trees_idx = NULL
+  )
+```
+
+Development
+```{r include= FALSE}
+pred_breakdown_dev <-  explainPredictions(model_xgb, explainer, ddev)
+
+cat('Breakdown Complete','\n')
+weights <-  rowSums(pred_breakdown_dev)
+pred_xgb_dev <-  1/(1+exp(-weights))
+cat(max(xgb_preds_dev - pred_xgb_dev),'\n')
+```
+
+Test
+```{r include=FALSE}
+pred_breakdown_test <-  explainPredictions(model_xgb, explainer, dtest)
+
+cat('Breakdown Complete','\n')
+weights <-  rowSums(pred_breakdown_test)
+pred_xgb_test <-  1/(1+exp(-weights))
+cat(max(xgb_preds_test - pred_xgb_test),'\n')
+```
+
+```{r}
+idx_to_get = as.integer(123)
+dev[idx_to_get,-"left"]
+```
+
+```{r}
+showWaterfall(model_xgb, explainer, ddev, data.matrix(dev[,-'left']) ,idx_to_get, type = "binary")
+```
+
+frac{1}{(1 + exp(-(-5.132407)))} = 0.005867705 
+
+### IMPACT AGAINST VARIABLE VALUE
+```{r}
+plot(dev[,aa_vlr_ing_bru_mes], pred_breakdown_dev[,aa_vlr_ing_bru_mes], cex=0.4, pch=16, xlab = "Monthly Income", ylab = "Monthly income Level impact on log-odds")
+```
+
+```{r}
+plot(dev[,pr_tcredito], pred_breakdown_dev[,pr_tcredito], cex=0.4, pch=16, xlab = "Credit cards holding", ylab = "Credit card holdings impact on log-odds")
+```
+
+```{r}
+cr <- colorRamp(c("blue", "red"))
+plot(dev[,aa_vlr_ing_bru_mes], pred_breakdown_dev[,aa_vlr_ing_bru_mes], col = rgb(cr(round(dev[,target])), max=255), cex=0.4, pch=16, xlab = "Monthly Income", ylab = "Monthly Income on log-odds")
+```
+
+```{r}
+cr <- colorRamp(c("blue", "red"))
+plot(dev[,pr_tcredito], pred_breakdown_dev[,pr_tcredito], col = rgb(cr(round(dev[,target])), max=255), cex= c(1, 0.4), pch=c(16, 1), xlab = "Credit card holdings", ylab = "Credit card holdings impact on log-odds")
+```
+
+## partial dependence plots 
+
+The associated R package xgboost (Chen et al. 2018) has been used to win a number of Kaggle competitions. It has been shown to be many times faster than the well-known gbm package (others 2017). However, unlike gbm, xgboost does not have built-in functions for constructing partial dependence plots (PDPs).
+
+
+
+
+```{r}
+partial(model_xgb, pred.var = "aa_vlr_ing_bru_mes", plot = TRUE, rug = TRUE,
+train = data.frame(as.matrix(master_dmatrix)))
+
+```
+
+```{r}
+
+```
+

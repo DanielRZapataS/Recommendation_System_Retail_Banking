@@ -1,0 +1,601 @@
+---
+title: "Churn"
+author: "Data_Training"
+date: "9 de abril de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+remove(list = ls())
+```
+
+# Cargar librerias necesarias
+```{r}
+if(!require(pacman)) install.packages("pacman")
+pacman::p_load("tidyverse", 
+               "MAS", 
+               "car",
+               "e1071",
+               "caret",
+               "cowplot",
+               "caTools",
+               "pROC",
+               "ggcorrplot",
+               "dplyr",
+               "tydyr",
+               "string",
+               "bitops",
+               "haven",
+               "rpart",
+               "rpart.plot",
+               "randomForest")
+
+```
+
+
+
+## Cargamos los datos
+
+
+
+```{r, echo=FALSE}
+url <- "https://docs.google.com/spreadsheets/d/e/2PACX-1vQlcwJySPcLb_v_rXtieQzh0AVWuamfsiwMitx4U3BljSfGq77k9njcPQBWgDqG3RLbqn8Wzberj-4L/pub?gid=20622133&single=true&output=csv"
+telco <- read.csv(url(url))
+```
+
+### Inspección de la base de datos
+
+Revisamos número de observaciones contenida en la base de datos,
+así como el tipo de objeto que es cada variable en R.
+
+
+```{r}
+glimpse(telco) # Tenemos 7043 observaciones con 21 variables.
+```
+
+### Ahora inspeccionamos cuáles variables tienen N/A's 
+
+
+```{r}
+# options(repr.plot.width = 6, repr.plot.height = 4)
+missing_data <- telco %>% summarise_all(funs(sum(is.na(.))/n()))
+missing_data <- tidyr::gather(missing_data, key = "variables", value = "percent_missing")
+p <- ggplot(missing_data, aes(x = reorder(variables, percent_missing), y = percent_missing)) +
+  geom_bar(stat = "identity", fill = "red", aes(color = I('white')), size = 0.3)+
+  xlab('variables')+
+  coord_flip()+ 
+  theme_bw()
+print(p)
+```
+
+ Solo hay 11 datos faltantes en el campo TotalCharges, 
+ Las filas asociadas a estos datos ser?n eliminados.
+
+```{r}
+telco <- telco[complete.cases(telco),]
+```
+
+ La base tiene 3 variables continuas: Tenencia, Cargos mensuales y Cargos totales. 
+ Mientras que SeniorCitizen est? en la forma 'int', la cu?l podemos volver cat?gorica. 
+```{r}
+telco$SeniorCitizen <- as.factor(ifelse(telco$SeniorCitizen==1, 'YES', 'NO'))
+
+```
+
+# EXPLORATORY DATA ANALYSIS:
+```{r}
+theme1 <- theme_bw()+
+  theme(axis.text.x = element_text(angle = 0, hjust = 1, vjust = 0.5),legend.position="none")
+theme2 <- theme_bw()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),legend.position="none")
+
+glimpse(telco)
+
+```
+
+# VISUALIZING THE CATEGORICAL DATA FIRST WITH RESPECT TO CHURN:
+
+Las columnas de CHURN nos informan sobre la cantidad de clientes que se fueron en el ?ltimo mes.
+Alrededor del 26% de los clientes abandonaron la plataforma en el ?ltimo mes.
+
+```{r}
+options(repr.plot.width = 6, repr.plot.height = 4)
+telco %>% 
+  group_by(Churn) %>% 
+  summarise(Count = n())%>% 
+  mutate(percent = prop.table(Count)*100)%>%
+  ggplot(aes(reorder(Churn, -percent), percent), fill = Churn)+
+  geom_col(fill = c("#FC4E07", "#E7B800"))+
+  geom_text(aes(label = sprintf("%.2f%%", percent)), hjust = 0.01,vjust = -0.5, size =3)+ 
+  theme_bw()+  
+  xlab("Churn") + 
+  ylab("Percent")+
+  ggtitle("Churn Percent")
+
+```
+
+Género: el porcentaje de abandono es casi igual en el caso de hombres y mujeres
+El porcentaje de abandono es mayor en el caso de las personas mayores
+Los clientes con Socios y Dependientes tienen una tasa de abandono m?s baja en comparaci?n con los que no tienen socios y Dependientes.
+
+```{r}
+# options(repr.plot.width = 12, repr.plot.height = 8)
+plot_grid(ggplot(telco, aes(x=gender,fill=Churn))+ geom_bar()+ theme1, 
+          ggplot(telco, aes(x=SeniorCitizen,fill=Churn))+ geom_bar(position = 'fill')+theme1,
+          ggplot(telco, aes(x=Partner,fill=Churn))+ geom_bar(position = 'fill')+theme1,
+          ggplot(telco, aes(x=Dependents,fill=Churn))+ geom_bar(position = 'fill')+theme1,
+          ggplot(telco, aes(x=PhoneService,fill=Churn))+ geom_bar(position = 'fill')+theme1,
+          ggplot(telco, aes(x=MultipleLines,fill=Churn))+ geom_bar(position = 'fill')+theme_bw()+
+            scale_x_discrete(labels = function(x){stringr::str_wrap(x, width = 10)}),
+          align = "h")
+
+```
+
+La tasa de abandono es mucho mayor en el caso de los servicios de Internet de fibra óptica.
+Los clientes que no tienen servicios como:
+No OnlineSecurity, OnlineBackup y TechSupport han abandonado la plataforma en el último mes.
+
+
+```{r}
+# options(repr.plot.width = 12, repr.plot.height = 8)
+plot_grid(ggplot(telco, aes(x=InternetService,fill=Churn))+ geom_bar(position = 'fill')+ theme1+
+            scale_x_discrete(labels = function(x){stringr::str_wrap(x, width = 10)}), 
+          ggplot(telco, aes(x=OnlineSecurity,fill=Churn))+ geom_bar(position = 'fill')+theme1+
+            scale_x_discrete(labels = function(x){stringr::str_wrap(x, width = 10)}),
+          ggplot(telco, aes(x=OnlineBackup,fill=Churn))+ geom_bar(position = 'fill')+theme1+
+            scale_x_discrete(labels = function(x){stringr::str_wrap(x, width = 10)}),
+          ggplot(telco, aes(x=DeviceProtection,fill=Churn))+ geom_bar(position = 'fill')+theme1+
+            scale_x_discrete(labels = function(x){stringr::str_wrap(x, width = 10)}),
+          ggplot(telco, aes(x=TechSupport,fill=Churn))+ geom_bar(position = 'fill')+theme1+
+            scale_x_discrete(labels = function(x){stringr::str_wrap(x, width = 10)}),
+          ggplot(telco, aes(x=StreamingTV,fill=Churn))+ geom_bar(position = 'fill')+theme_bw()+
+            scale_x_discrete(labels = function(x){stringr::str_wrap(x, width = 10)}),
+          align = "h")
+
+```
+
+Un mayor porcentaje de clientes con suscripci?n mensual se han ido en comparaci?n con aquellos que tienen contrato de uno o dos a?os.
+El porcentaje de abandono es mayor en el caso de los clientes que tienen opciones de facturaci?n electr?nica.
+Los clientes que tienen el m?todo de pago ElectronicCheck tienden a abandonar la plataforma m?s en comparaci?n que con otras opciones.
+
+
+```{r}
+plot_grid(ggplot(telco, aes(x=StreamingMovies,fill=Churn))+ 
+            geom_bar(position = 'fill')+ theme1+
+            scale_x_discrete(labels = function(x){stringr::str_wrap(x, width = 10)}), 
+          ggplot(telco, aes(x=Contract,fill=Churn))+ 
+            geom_bar(position = 'fill')+theme1+
+            scale_x_discrete(labels = function(x){stringr::str_wrap(x, width = 10)}),
+          ggplot(telco, aes(x=PaperlessBilling,fill=Churn))+ 
+            geom_bar(position = 'fill')+theme1+
+            scale_x_discrete(labels = function(x){stringr::str_wrap(x, width = 10)}),
+          ggplot(telco, aes(x=PaymentMethod,fill=Churn))+
+            geom_bar(position = 'fill')+theme_bw()+
+            scale_x_discrete(labels = function(x){stringr::str_wrap(x, width = 10)}),
+          align = "h")
+
+```
+
+# ANÁLISIS DE LAS VARIABLES CONTINUAS
+
+Tenure: La tenencia media para los clientes que han dejado es de alrededor de 10 meses.
+
+```{r}
+# options(repr.plot.width =6, repr.plot.height = 2)
+ggplot(telco, aes(y= tenure, x = "", fill = Churn)) + 
+  geom_boxplot()+ 
+  theme_bw()+
+  xlab(" ")
+
+```
+
+MonthlyCharges: Los clientes que se han ido son los que m?s cargos mensuales tienen.
+La mediana está por encima de 75. 
+```{r}
+ggplot(telco, aes(y= MonthlyCharges, x = "", fill = Churn)) + 
+  geom_boxplot()+ 
+  theme_bw()+
+  xlab(" ")
+
+```
+
+TotalCharges: La mediana de los cargos totales de los clientes que se han ido es bajo.
+```{r}
+ggplot(telco, aes(y= TotalCharges, x = "", fill = Churn)) + 
+  geom_boxplot()+ 
+  theme_bw()+
+  xlab(" ")
+
+```
+
+Revisando la correlación entre las variables continuas. 
+Total Charges tienen una correlaci?n posiva con MonthlyCharges y Tenure.
+
+```{r}
+# options(repr.plot.width =6, repr.plot.height = 4)
+telco_cor <- round(cor(telco[,c("tenure", "MonthlyCharges", "TotalCharges")]), 1)
+ggcorrplot(telco_cor,  title = "Correlation")+theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+### Revisamos los outliers de las variables continuas: 
+```{r}
+# options(repr.plot.width =4, repr.plot.height = 4)
+boxplot(telco$tenure)$out
+boxplot(telco$MonthlyCharges)$out
+boxplot(telco$TotalCharges)$out
+
+```
+
+
+# LIMPIANDO BASE DE DATOS:
+
+Variables categáricas: Del análisis anterior sabemos que hay algunas características
+categóricas que tienen 'No' y 'No hay servicio de Internet' o 'No hay servicio de teléfono' 
+como una categor?a. Entonces las cambiaremos por 'No'. 
+
+```{r}
+telco <- data.frame(lapply(telco, function(x) {
+  gsub("No internet service", "No", x)}))
+
+telco <- data.frame(lapply(telco, function(x) {
+  gsub("No phone service", "No", x)}))
+
+```
+
+
+Las variables continuas no tienen el mismo rango, por lo tanto son estandarizadas:
+
+```{r}
+num_columns <- c("tenure", "MonthlyCharges", "TotalCharges")
+telco[num_columns] <- sapply(telco[num_columns], as.numeric)
+
+telco_int <- telco[,c("tenure", "MonthlyCharges", "TotalCharges")]
+telco_int <- data.frame(scale(telco_int))
+
+```
+
+Creación de caracter?sticas derivadas: 
+Se crea una variable que contiene rangos de tenencia
+
+```{r}
+max(telco$tenure)
+min(telco$tenure)
+telco <- mutate(telco, tenure_bin = tenure)
+
+telco$tenure_bin[telco$tenure_bin >=0 & telco$tenure_bin <= 12] <- '0-1 year'
+telco$tenure_bin[telco$tenure_bin > 12 & telco$tenure_bin <= 24] <- '1-2 years'
+telco$tenure_bin[telco$tenure_bin > 24 & telco$tenure_bin <= 36] <- '2-3 years'
+telco$tenure_bin[telco$tenure_bin > 36 & telco$tenure_bin <= 48] <- '3-4 years'
+telco$tenure_bin[telco$tenure_bin > 48 & telco$tenure_bin <= 60] <- '4-5 years'
+telco$tenure_bin[telco$tenure_bin > 60 & telco$tenure_bin <= 72] <- '5-6 years'
+
+telco$tenure_bin <- as.factor(telco$tenure_bin)
+
+```
+
+El número máximo de clientes tiene una permanencia de 0-1 a?os. 
+Seguidos de los que tienen entre 5-6 a?os.
+```{r}
+# options(repr.plot.width =6, repr.plot.height = 3)
+ggplot(telco, aes(tenure_bin, fill = tenure_bin)) + geom_bar()+ theme1
+
+```
+
+Creación de variables dummy: Porque varias est?n como caracter.  
+
+```{r}
+telco_cat <- telco[,-c(1,6,19,20)]
+dummy<- data.frame(sapply(telco_cat,function(x) 
+                   data.frame(model.matrix(~x-1,data =telco_cat))[,-1]))
+head(dummy)
+
+```
+
+
+### Creamos la base final a utilizar: Continuas y dummys
+
+```{r}
+telco_final <- cbind(telco_int,dummy)
+head(telco_final)
+
+```
+
+
+# CONSTRUCCI?N DEL MODELO A UTILIZAR
+
+##  MODELO: REGRESI?N LOGISTICA.
+
+
+Dividimos la base de datos en train y validation
+
+```{r}
+set.seed(123)
+indices = sample.split(telco_final$Churn, SplitRatio = 0.7)
+train = telco_final[indices,]
+validation = telco_final[!(indices),]
+
+```
+
+## MODELO 1: Utilizando todas las variables 
+
+```{r}
+model_1 = glm(Churn ~ ., data = train, family = "binomial")
+summary(model_1)
+
+```
+
+
+## MODELO 2: Ahora construimos el modelo utilizando el criterio stepAIC.
+Este procedimiento quita o agrega variables iterativamente.
+
+```{r}
+model_2<- MASS::stepAIC(model_1, direction="both")
+summary(model_2)
+
+```
+
+Podemos usar el factor de inflaci?n de varianza (vif) para deshacernos
+de los predictores redundantes o las variables que tienen una alta
+multicolinealidad entre ellos. Un predictor que tiene un VIF de 2 o
+menos generalmente se considera bueno y se puede suponer que no 
+está correlacionado con otras variables predictoras.
+```{r}
+vif(model_2)
+
+```
+
+## MODELO 3: 
+Omitimos la variables DeviceProtection al no ser significativa en MODELO 2
+
+```{r}
+model_3 <-glm(formula = Churn ~ tenure + MonthlyCharges + SeniorCitizen + 
+                Partner + InternetService.xFiber.optic + InternetService.xNo + 
+                OnlineSecurity + OnlineBackup + TechSupport + 
+                StreamingTV + Contract.xOne.year + Contract.xTwo.year + PaperlessBilling + 
+                PaymentMethod.xElectronic.check + tenure_bin.x1.2.years + 
+                tenure_bin.x5.6.years, family = "binomial", data = train)
+summary(model_3)
+vif(model_3)
+
+```
+
+# MODELO 4: 
+Omitimos StreamingTV por no ser significativa
+```{r}
+model_4 <- glm(formula = Churn ~ tenure + MonthlyCharges + SeniorCitizen + 
+                 Partner + InternetService.xFiber.optic + InternetService.xNo + 
+                 OnlineSecurity + OnlineBackup + TechSupport +  
+                 Contract.xOne.year + Contract.xTwo.year + PaperlessBilling + 
+                 PaymentMethod.xElectronic.check + tenure_bin.x1.2.years + 
+                 tenure_bin.x5.6.years, family = "binomial", data = train)
+
+summary(model_4)
+vif(model_4)
+
+```
+
+Utilicemos el MODELO 3 para predecir (inicialmente)
+
+```{r}
+final_model <- model_3
+pred <- predict(final_model, type = "response", newdata = validation[,-24])
+summary(pred)
+validation$prob <- pred
+
+```
+
+Cutoff: 50%
+
+```{r}
+pred_churn <- factor(ifelse(pred >= 0.50, "Yes", "No"))
+actual_churn <- factor(ifelse(validation$Churn==1,"Yes","No"))
+table(actual_churn,pred_churn)
+
+```
+
+Calculamos medidas de Accuracy, Sensitivity, Specificity utulizando el Cutoff de 50%
+
+```{r}
+cutoff_churn <- factor(ifelse(pred >=0.50, "Yes", "No"))
+conf_final <- confusionMatrix(cutoff_churn, actual_churn, positive = "Yes")
+accuracy <- conf_final$overall[1]
+sensitivity <- conf_final$byClass[1]
+specificity <- conf_final$byClass[2]
+accuracy
+sensitivity
+specificity
+
+```
+
+Cuando se utiliza un cutoff de 50% se tiene un buen resultado en las medidas
+Accuracy y Specificity, pero la Sensitivity es menor. Entonces, necesitamos
+encontrar ese umbral en la probabilidad en que las tres medidas se desempe?an muy bien.
+
+```{r}
+perform_fn <- function(cutoff) {
+  predicted_churn <- factor(ifelse(pred >= cutoff, "Yes", "No"))
+  conf <- confusionMatrix(predicted_churn, actual_churn, positive = "Yes")
+  accuray <- conf$overall[1]
+  sensitivity <- conf$byClass[1]
+  specificity <- conf$byClass[2]
+  out <- t(as.matrix(c(sensitivity, specificity, accuray))) 
+  colnames(out) <- c("sensitivity", "specificity", "accuracy")
+  return(out)
+}
+
+# options(repr.plot.width =8, repr.plot.height =6)
+summary(pred)
+s = seq(0.01,0.80,length=100)
+OUT = matrix(0,100,3)
+
+for(i in 1:100) {
+  OUT[i,] = perform_fn(s[i]) } 
+
+plot(s, OUT[,1],xlab="Cutoff",ylab="Value",cex.lab=1.5,cex.axis=1.5,ylim=c(0,1),
+     type="l",lwd=2,axes=FALSE,col=2)
+axis(1,seq(0,1,length=5),seq(0,1,length=5),cex.lab=1.5)
+axis(2,seq(0,1,length=5),seq(0,1,length=5),cex.lab=1.5)
+lines(s,OUT[,2],col="darkgreen",lwd=2)
+lines(s,OUT[,3],col=4,lwd=2)
+box()
+legend("bottom",col=c(2,"darkgreen",4,"darkred"),text.font =1,inset = 0.01,
+       box.lty=0,cex = 0.5, 
+       lwd=c(2,2,2,2),c("Sensitivity","Specificity","Accuracy"))
+abline(v = 0.32, col="red", lwd=1, lty=2)
+axis(1, at = seq(0.1, 1, by = 0.1))
+
+```
+
+Utilizaremos un cutoff de 32%. 
+
+```{r}
+cutoff_churn <- factor(ifelse(pred >=0.32, "Yes", "No"))
+conf_final <- confusionMatrix(cutoff_churn, actual_churn, positive = "Yes")
+accuracy <- conf_final$overall[1]
+sensitivity <- conf_final$byClass[1]
+specificity <- conf_final$byClass[2]
+accuracy
+sensitivity
+specificity
+
+```
+
+
+# MODELO: ÁRBOL DE DECISIÓN
+
+```{r}
+set.seed(123)
+telco_final$Churn <- as.factor(telco_final$Churn)
+indices = sample.split(telco_final$Churn, SplitRatio = 0.7)
+train = telco_final[indices,]
+validation = telco_final[!(indices),]
+
+```
+
+Entrenamos el árbol con todas las variables y predecimos "validation data"
+```{r}
+# options(repr.plot.width = 10, repr.plot.height = 8)
+library(rpart)
+library(rpart.plot)
+
+```
+
+####Training
+```{r}
+Dtree = rpart(Churn ~., data = train, method = "class")
+summary(Dtree)
+
+```
+
+####Predicting 
+```{r}
+DTPred <- predict(Dtree,type = "class", newdata = validation[,-24])
+
+```
+
+Miramos la matriz de confusión
+```{r}
+confusionMatrix(validation$Churn, DTPred)
+
+```
+
+El modelo de ?rbol de decisión (precisi?n - 78,1%) proporciona una precisi?n 
+ligeramente mejor con respecto al modelo de regresi?n log?stica (precisi?n 75%). 
+La sensibilidad tambi?n es mejor en el caso del ?rbol de decisi?n que es 82.45%. 
+Sin embargo, la especificidad ha disminuido a 61.38% en el caso del ?rbol de Decisi?n 
+en comparaci?n con el modelo de regresi?n log?stica.
+
+
+# MODELO: RANDOM FOREST
+
+```{r}
+set.seed(123)
+telco_final$Churn <- as.factor(telco_final$Churn)
+indices = sample.split(telco_final$Churn, SplitRatio = 0.7)
+train = telco_final[indices,]
+validation = telco_final[!(indices),]
+
+model.rf <- randomForest(Churn ~ ., data=train, proximity=FALSE,importance = FALSE,
+                         ntree=500,mtry=4, do.trace=FALSE)
+model.rf
+
+```
+
+La estimación del error de OOB llega a alrededor del 20,87%, por lo que el modelo 
+tiene alrededor del 79% de precisi?n de la muestra para el conjunto de entrenamiento. 
+Revisemos la predicci?n y precisi?n en nuestros datos de validaci?n.
+
+```{r}
+testPred <- predict(model.rf, newdata=validation[,-24])
+table(testPred, validation$Churn)
+confusionMatrix(validation$Churn, testPred)
+
+```
+
+El modelo b?sico de RandomForest ofrece una precisi?n de 78.86% 
+(casi lo suficientemente cerca de la estimaci?n de OOB), sensibilidad del 82.46% 
+y especificidad del 63.99%.
+
+```{r}
+varImpPlot(model.rf)
+
+```
+
+A continuaci?n se muestra la gr?fica de importancia variable, que muestra
+el atributo m?s significativo en orden decreciente por la disminuci?n media
+en Gini. La disminuci?n media Gini mide la pureza de los nodos al final del 
+árbol. Cuanto m?s alto es el ?ndice de Gini, mejor es la homogeneidad.
+
+# IDENTIFICANDO EL MEJOR MODELO
+
+Miramos el área bajo la curva de ROC (AUC):
+
+```{r}
+# options(repr.plot.width =10, repr.plot.height = 8)
+
+glm.roc <- roc(response = validation$Churn, predictor = as.numeric(pred))
+DT.roc <- roc(response = validation$Churn, predictor = as.numeric(DTPred))
+rf.roc <- roc(response = validation$Churn, predictor = as.numeric(testPred))
+
+plot(glm.roc,      legacy.axes = TRUE, print.auc.y = 1.0, print.auc = TRUE)
+plot(DT.roc, col = "blue", add = TRUE, print.auc.y = 0.65, print.auc = TRUE)
+plot(rf.roc, col = "red" , add = TRUE, print.auc.y = 0.85, print.auc = TRUE)
+legend("bottom", c("Random Forest", "Decision Tree", "Logistic"),
+       lty = c(1,1), lwd = c(2, 2), col = c("red", "blue", "black"), cex = 0.45)
+
+```
+
+# RESUMEN DE TODOS LOS MODELOS:
+
+### Logistic Regression:
+Accuracy 75.59%,
+Sensitivity 75.75%
+Specificity 75.53%
+
+### DecisionTrees:
+Accuracy 78.1%,
+Sensitivity 82.45%
+Specificity 61.38%
+
+### RandomForest:
+Accuracy 78.86%,
+Sensitivity 82.46%
+Specificity 63.99%
+
+
+# FIN DE LA PROGRAMACIÓN
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,186 @@
+
+
+#' Score monthly table
+#'
+#' @param model_alias_score : Model previously made to use to score (character)
+#' @param date_to_score : Month to score (character)
+#' @param model_type_score : product of model choseen to score   
+#' @param performance_calculation : use if exist a target to compare (logical)
+#'
+#' @return
+#' @export
+#'
+#' @examples
+score_mensual <- function(model_alias_score,
+                          date_to_score,
+                          model_type_score,
+                          performance_calculation ) {
+  print(paste("Scoring", model_type_score, "of", model_alias_scoring,
+              "month", date_to_score))
+  ifelse(performance_calculation,
+         results_path <- os.path.join(results_path, "Performance"),
+         results_path <- os.path.join(results_path, "Prediction"))
+
+  dir.create(os.path.join(results_path, date_to_score))
+  results_alias_path <-
+    os.path.join(results_path, date_to_score ,model_alias_scoring)
+  dir.create(results_alias_path)
+  
+  print("Upload master table")
+  master <- get.path(master_path, "master") %>% readRDS()
+
+    
+  all_variables <- names(master)
+  lags <- names(master)[grepl("month_ago", names(master))]
+  lags_product <- lags[grepl(model_type_score, lags)]
+  last_owned <- names(master)[grepl("last.owned", names(master))]
+  last_owned_product <- last_owned[grepl(model_type_score, last_owned)]
+  selected_var <- all_variables[all_variables %!in% c(lags, last_owned)]
+  selected_var <- c(selected_var, lags_product, last_owned_product)
+  master <- master[,  mget(selected_var)]
+
+  test_cut <-
+    as.Date(paste0(as.character(date_to_score), '01'), format = '%Y%m%d')
+  months_cut <- c(test_cut, floor_date(as.Date(test_cut) + months(2), "month"))
+  master <- master[periodo %in% months_cut]
+  
+  print("Creating target variable")
+  var_target <- paste0("pr_", model_type_score)
+  target <-
+    master[, .(llave,
+               month.id = month.id - 2,
+               var_target_2monthsFurther = get(var_target))]
+  master <-
+    merge(master,
+          target,
+          by = c("llave", "month.id"),
+          all.x = TRUE)
+  master[, target := ifelse(var_target_2monthsFurther - get(var_target) > 0, 1, 0)]
+  master[, var_target_2monthsFurther := NULL]
+  rm(target)
+  gc()
+  
+  # add in purchase frequency feature for each product
+  print("Load purchase frequencies")
+  
+  purchase.frequencies <-
+    readRDS(get.path(feature_path,  get_month(1)))
+  
+  purchase.frequencies <- data.table(purchase.frequencies)
+  purchase_frequencies_products <-
+    names(purchase.frequencies)[grepl(model_type_modeling, names(purchase.frequencies))]
+  purchase.frequencies <-
+    purchase.frequencies[, mget(c(
+      "llave",
+      "month.id",
+      purchase_frequencies_products,
+      "num.transactions"
+    ))]
+  
+  
+  master   <-
+    merge(master,
+          purchase.frequencies,
+          by = c("month.id", "llave"),
+          all.x = TRUE)
+  master[is.na(master)] <- 0
+  rm(purchase.frequencies)
+  gc()
+  
+  # create train and test tables
+  print("Creating score tables")
+  # converting cutting months
+  test_cut <-
+    as.Date(paste0(as.character(date_to_score), '01'), format = '%Y%m%d')
+  
+  # divinding master table
+  test <- master[periodo == test_cut]
+  test[is.na(test)] <- 0
+  rm(master)
+  gc()
+  
+  # Classifing variables into categories
+  # there's a bunch of features related to the products, and thus they have similar
+  # names. Separate them out to keep things straight
+  
+  id_variables <-
+    c("llave", "periodo", "month.id", "month", "year", "target")
+  products_variables <- names(test)[grepl("pr_", names(test))]
+  products_variables <-
+    c(products_variables, "total_products", "num.transactions")
+  crm_vars <-
+    names(test)[names(test) %!in% c(id_variables, products_variables)]
+  
+  categorical_cols <-
+    c(crm_vars[sapply(test[, mget(crm_vars)], is.factor)],
+      "month", "year")
+  categorical_cols <-
+    categorical_cols[categorical_cols %!in% c("bb_seg_comercial", "aa_cod_ocupacion")]
+  
+  numeric_cols <-
+    c(crm_vars[!(sapply(test[, mget(crm_vars)], is.factor))],
+      products_variables,
+      c("bb_seg_comercial", "aa_cod_ocupacion"))
+  
+  
+  # one-hot encode the categorical features
+  
+  ohe_test <- dummyVars( ~ ., data = test[, mget(categorical_cols)])
+  ohe_test <- predict(ohe_test, test[, mget(categorical_cols)])
+  ohe_cols <- colnames(ohe_test)
+  ohe_test <- as(data.matrix(ohe_test), "dgCMatrix")
+  
+  
+  # data to train and predict
+  
+  test_dmatrix       <-
+    cbind(ohe_test, data.matrix(test[, mget(numeric_cols)]))
+  rm( ohe_test)
+  gc()
+  
+  
+  # save model to binary local file
+  print("load model")
+  model_alias_path <-
+    os.path.join(models_path, model_alias_scoring)
+  model <-  xgb.load(os.path.join(model_alias_path, paste0(model_alias_scoring, ".model")))
+  
+  test[, pred := predict(model, test_dmatrix)]
+  
+  
+  if(performance_calculation){
+    test[,bucket :=  ntile(-pred, 10)]
+    setkey(test, bucket)
+    fwrite(test[, .(llave, periodo, target, pred, bucket)],
+           os.path.join(results_alias_path, "pred_score.csv"))
+    # metrics model
+    print("Making metrics model")
+    cols <- c(ohe_cols, numeric_cols)
+    
+    performanceReport(test,
+                      path = os.path.join(results_path, date_to_score),
+                      modelFolder = model_alias_scoring,
+                      alias = "score")
+    importance_matrix <-
+      xgb.importance(feature_names = cols, model = model)
+    
+    no_quantil <-
+      c("llave", "month.id", "aa_cod_ciiu", "departamento")
+    quantil <- names(test)[names(test) %!in% no_quantil]
+    exportQuantile(
+      dt = test[, mget(quantil)],
+      mostImp = importance_matrix ,
+      outputPath = os.path.join(results_path, date_to_score,
+                                model_alias_scoring, "quantile_score.csv")
+    )
+  
+    
+  }else{
+    test[,bucket :=  ntile(-pred, 10)]
+    setkey(test, bucket)
+    fwrite(test[, .(llave, periodo, pred, bucket)],
+           os.path.join(results_alias_path, "pred_score.csv"))
+  }
+}
+
+
